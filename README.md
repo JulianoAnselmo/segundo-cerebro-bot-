@@ -10,7 +10,6 @@ Bot Telegram que lança receitas, despesas, cria clientes/leads/propostas, appen
 | `/cartao <valor> <categoria> [desc]` | `/cartao 152.30 alimentacao mercado` |
 | `/pix <valor> <categoria> [desc]` | `/pix 50 transporte uber` |
 | `/dinheiro <valor> <categoria> [desc]` | `/dinheiro 30 lazer cafe` |
-| `/debito <valor> <categoria> [desc]` | `/debito 80 saude farmacia` |
 | `/boleto <valor> <categoria> [desc]` | `/boleto 200 educacao curso` |
 
 ### 💸 Genérico

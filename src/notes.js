@@ -21,25 +21,27 @@ function slug(s) {
     .slice(0, 60);
 }
 
-export async function criarLancamento(vaultPath, { natureza, valor, categoria, metodo, conta, descricao }) {
+export async function criarLancamento(vaultPath, { natureza, valor, categoria, metodo, conta, descricao, data: dataParam, origem }) {
   const dir = join(vaultPath, 'Pessoal', 'Financeiro', 'Lancamentos');
   await mkdir(dir, { recursive: true });
 
-  const data = todayISO();
-  const dataFile = todayFile();
+  const hojeISO = todayISO();
+  const data = dataParam || hojeISO;
+  const [yyyy, mm, dd] = data.split('-');
+  const dataFile = `${dd}-${mm}-${yyyy}`;
   const baseName = slug(descricao || categoria || natureza);
   const fileName = `${dataFile}-${baseName}.md`;
   const filePath = join(dir, fileName);
 
-  const titulo = (descricao || categoria || natureza)
-    .replace(/\b\w/g, c => c.toUpperCase());
+  const tituloRaw = descricao || categoria || natureza;
+  const titulo = tituloRaw.charAt(0).toLocaleUpperCase('pt-BR') + tituloRaw.slice(1);
 
   const tagsList = ['pessoal', 'financeiro', 'lancamento', natureza];
   if (metodo) tagsList.push(metodo);
 
   const content = `---
-created: ${data}
-modified: ${data}
+created: ${hojeISO}
+modified: ${hojeISO}
 tipo: lancamento
 natureza: ${natureza}
 valor: ${valor.toFixed(2)}
@@ -48,6 +50,7 @@ categoria: ${categoria}
 metodo: ${metodo || ''}
 conta: ${conta || ''}
 descricao: "${(descricao || '').replace(/"/g, '\\"')}"
+origem: ${origem || 'avulso'}${metodo === 'cartao' ? '\npago: false\nvencimento_dia: 15' : ''}
 tags: [${tagsList.join(', ')}]
 ---
 
@@ -103,13 +106,26 @@ export async function marcarFixaPaga(vaultPath, { despesaSlug }) {
   let txt = await readFile(filePath, 'utf8');
   const data = todayISO();
 
+  const fmFixa = parseFrontmatter(txt);
   txt = txt
     .replace(/^status:\s*.*$/m, `status: pago`)
     .replace(/^modified:\s*.*$/m, `modified: ${data}`)
     .replace(/^ultimo_pagamento:\s*.*$/m, `ultimo_pagamento: ${data}`);
 
   await writeFile(filePath, txt, 'utf8');
-  return { fileName: alvo };
+
+  const valor = parseFloat(fmFixa.valor_mensal || 0);
+  const lanc = await criarLancamento(vaultPath, {
+    natureza: 'despesa',
+    valor,
+    categoria: fmFixa.categoria || 'conta-fixa',
+    metodo: fmFixa.metodo || 'pix',
+    descricao: alvo.replace(/^\d{2}-\d{2}-\d{4}-/, '').replace(/\.md$/, '').replace(/-/g, ' '),
+    data,
+    origem: 'fixa'
+  });
+
+  return { fileName: alvo, lancamento: lanc };
 }
 
 function parseFrontmatter(txt) {
@@ -345,6 +361,51 @@ export async function lerStatus(vaultPath) {
   return { mrr, qtdClientes, qtdLeads, patrimonio, receitaMes, despesaMes, qtdLanc };
 }
 
+export async function lerResumo(vaultPath, periodo = 'mes') {
+  const { readdir } = await import('node:fs/promises');
+  const lancDir = join(vaultPath, 'Pessoal', 'Financeiro', 'Lancamentos');
+  const hoje = new Date();
+  let inicio;
+  if (periodo === 'hoje') {
+    inicio = todayISO();
+  } else if (periodo === 'semana') {
+    const d = new Date();
+    d.setDate(d.getDate() - 6);
+    inicio = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  } else {
+    inicio = `${hoje.getFullYear()}-${pad(hoje.getMonth() + 1)}-01`;
+  }
+  let receita = 0, despesa = 0, qtd = 0;
+  const cat = {}, met = {};
+  try {
+    const arquivos = (await readdir(lancDir)).filter(f => f.endsWith('.md') && !f.includes('Lancamentos.md'));
+    for (const a of arquivos) {
+      const fm = parseFrontmatter(await readFile(join(lancDir, a), 'utf8'));
+      if (fm.tipo !== 'lancamento') continue;
+      const data = fm.data || '';
+      if (data < inicio) continue;
+      const v = parseFloat(fm.valor || 0);
+      qtd++;
+      if (fm.natureza === 'receita') receita += v;
+      else if (fm.natureza === 'despesa') {
+        despesa += v;
+        cat[fm.categoria || '—'] = (cat[fm.categoria || '—'] || 0) + v;
+        met[fm.metodo || '—'] = (met[fm.metodo || '—'] || 0) + v;
+      }
+    }
+  } catch {}
+  const topCat = Object.entries(cat).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const topMet = Object.entries(met).sort((a, b) => b[1] - a[1]);
+  return { periodo, inicio, receita, despesa, sobra: receita - despesa, qtd, topCat, topMet };
+}
+
+export async function removerLancamento(vaultPath, fileName) {
+  const { unlink } = await import('node:fs/promises');
+  const filePath = join(vaultPath, 'Pessoal', 'Financeiro', 'Lancamentos', fileName);
+  await unlink(filePath);
+  return { fileName };
+}
+
 export async function lerSaldos(vaultPath) {
   const { readdir } = await import('node:fs/promises');
   const contas = [];
@@ -360,4 +421,63 @@ export async function lerSaldos(vaultPath) {
     }
   } catch {}
   return contas.sort((a, b) => b.saldo - a.saldo);
+}
+
+export async function lerContasSlugs(vaultPath) {
+  const { readdir } = await import('node:fs/promises');
+  const slugs = [];
+  try {
+    const dir = join(vaultPath, 'Pessoal', 'Financeiro', 'Contas');
+    const arquivos = (await readdir(dir)).filter(f => f.endsWith('.md') && !f.includes('Contas.md'));
+    for (const a of arquivos) {
+      const slug = a.replace(/^\d{2}-\d{2}-\d{4}-/, '').replace('.md', '');
+      slugs.push(slug);
+    }
+  } catch {}
+  return slugs;
+}
+
+export async function criarSnapshotPatrimonio(vaultPath, { valor, contas }) {
+  const dir = join(vaultPath, 'Pessoal', 'Financeiro', 'Snapshots');
+  await mkdir(dir, { recursive: true });
+  const data = todayISO();
+  const fileName = `${data}.md`;
+  const filePath = join(dir, fileName);
+  const dataBr = data.split('-').reverse().join('/');
+  const contasYaml = (contas || []).map(c => `  - { banco: "${c.banco || c.nome}", saldo: ${c.saldo.toFixed(2)} }`).join('\n');
+  const contasMd = (contas || []).map(c => `- **${c.banco || c.nome}:** R$ ${c.saldo.toFixed(2).replace('.', ',')}`).join('\n');
+  const content = `---
+created: ${data}
+tipo: snapshot
+patrimonio: ${valor.toFixed(2)}
+contas:
+${contasYaml || '  []'}
+tags: [pessoal/financeiro/snapshot]
+---
+
+# Snapshot — ${dataBr}
+
+- **Patrimônio total:** R$ ${valor.toFixed(2).replace('.', ',')}
+${contasMd}
+
+> Criado via Telegram bot.
+`;
+  await writeFile(filePath, content, 'utf8');
+  return { fileName, filePath };
+}
+
+export async function lerFixasPendentesSlugs(vaultPath) {
+  const { readdir } = await import('node:fs/promises');
+  const slugs = [];
+  try {
+    const dir = join(vaultPath, 'Pessoal', 'Financeiro');
+    const arquivos = (await readdir(dir)).filter(f => f.endsWith('.md'));
+    for (const a of arquivos) {
+      const fm = parseFrontmatter(await readFile(join(dir, a), 'utf8'));
+      if (fm.tipo === 'despesa' && fm.recorrente === 'true' && fm.status !== 'pago') {
+        slugs.push(a.replace(/^\d{2}-\d{2}-\d{4}-/, '').replace('.md', ''));
+      }
+    }
+  } catch {}
+  return slugs;
 }

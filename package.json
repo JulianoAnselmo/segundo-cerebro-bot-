@@ -1,7 +1,7 @@
 {
   "name": "telegram-financeiro-bot",
-  "version": "1.0.0",
-  "description": "Bot Telegram para lançar receitas/despesas no vault Obsidian via git",
+  "version": "2.0.0",
+  "description": "Bot Telegram premium pra vault Obsidian — finanças, empresa, diário, IA, notificações",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
@@ -10,7 +10,8 @@
   "type": "module",
   "dependencies": {
     "telegraf": "^4.16.3",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "node-cron": "^3.0.3"
   },
   "engines": {
     "node": ">=20"

@@ -1,0 +1,7 @@
+{
+  "cafe": { "tipo": "despesa", "valor": 8, "metodo": "pix", "categoria": "alimentacao", "descricao": "café" },
+  "almoco": { "tipo": "despesa", "valor": 30, "metodo": "pix", "categoria": "alimentacao", "descricao": "almoço" },
+  "uber": { "tipo": "despesa", "valor": 20, "metodo": "pix", "categoria": "transporte", "descricao": "uber" },
+  "mercado": { "tipo": "despesa", "valor": 200, "metodo": "cartao", "categoria": "alimentacao", "descricao": "mercado" },
+  "gas": { "tipo": "despesa", "valor": 100, "metodo": "pix", "categoria": "transporte", "descricao": "gasolina" }
+}
