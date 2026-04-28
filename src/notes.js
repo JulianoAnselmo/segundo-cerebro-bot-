@@ -71,6 +71,19 @@ tags: [${tagsList.join(', ')}]
   return { fileName, filePath };
 }
 
+export async function ajustarSaldoConta(vaultPath, { contaSlug, delta }) {
+  const dir = join(vaultPath, 'Pessoal', 'Financeiro', 'Contas');
+  const { readdir } = await import('node:fs/promises');
+  const arquivos = await readdir(dir);
+  const alvo = arquivos.find(f => f.toLowerCase().includes(contaSlug.toLowerCase()) && f.endsWith('.md'));
+  if (!alvo) throw new Error(`Conta não encontrada: ${contaSlug}`);
+  const fm = parseFrontmatter(await readFile(join(dir, alvo), 'utf8'));
+  const atual = parseFloat(fm.saldo || 0);
+  const novo = atual + delta;
+  await atualizarSaldoConta(vaultPath, { contaSlug, novoSaldo: novo });
+  return { fileName: alvo, saldoAnterior: atual, saldoNovo: novo };
+}
+
 export async function atualizarSaldoConta(vaultPath, { contaSlug, novoSaldo }) {
   const dir = join(vaultPath, 'Pessoal', 'Financeiro', 'Contas');
   const { readdir } = await import('node:fs/promises');
@@ -364,26 +377,36 @@ export async function lerStatus(vaultPath) {
 export async function lerResumo(vaultPath, periodo = 'mes') {
   const { readdir } = await import('node:fs/promises');
   const lancDir = join(vaultPath, 'Pessoal', 'Financeiro', 'Lancamentos');
+  const finDir = join(vaultPath, 'Pessoal', 'Financeiro');
+  const cliDir = join(vaultPath, 'Empresa', 'Clientes');
   const hoje = new Date();
-  let inicio;
+  let inicio, fim;
   if (periodo === 'hoje') {
     inicio = todayISO();
+    fim = inicio;
   } else if (periodo === 'semana') {
     const d = new Date();
     d.setDate(d.getDate() - 6);
     inicio = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    fim = todayISO();
   } else {
     inicio = `${hoje.getFullYear()}-${pad(hoje.getMonth() + 1)}-01`;
+    const last = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0);
+    fim = `${last.getFullYear()}-${pad(last.getMonth() + 1)}-${pad(last.getDate())}`;
   }
+  const inRange = d => d && d >= inicio && d <= fim;
+
   let receita = 0, despesa = 0, qtd = 0;
   const cat = {}, met = {};
+
+  // Lancamentos avulsos (ignora espelhos de fixas pra evitar dupla contagem)
   try {
     const arquivos = (await readdir(lancDir)).filter(f => f.endsWith('.md') && !f.includes('Lancamentos.md'));
     for (const a of arquivos) {
       const fm = parseFrontmatter(await readFile(join(lancDir, a), 'utf8'));
       if (fm.tipo !== 'lancamento') continue;
-      const data = fm.data || '';
-      if (data < inicio) continue;
+      if (fm.origem === 'fixa') continue;
+      if (!inRange(fm.data || '')) continue;
       const v = parseFloat(fm.valor || 0);
       qtd++;
       if (fm.natureza === 'receita') receita += v;
@@ -394,9 +417,40 @@ export async function lerResumo(vaultPath, periodo = 'mes') {
       }
     }
   } catch {}
+
+  // Fixas (esperado mensal) — só conta se periodo cobre o mes inteiro (mes/semana intersecta)
+  // Pra match com dashboard: soma TODAS recorrentes independente de pago, mas só se mes atual
+  const isMesPeriodo = periodo === 'mes';
+  if (isMesPeriodo) {
+    try {
+      const arquivos = (await readdir(finDir)).filter(f => f.endsWith('.md'));
+      for (const a of arquivos) {
+        const fm = parseFrontmatter(await readFile(join(finDir, a), 'utf8'));
+        if (fm.recorrente !== 'true' && fm.recorrente !== true) continue;
+        if (fm.tipo === 'despesa') {
+          const v = parseFloat(fm.valor_mensal || 0);
+          despesa += v;
+          cat[fm.categoria || '—'] = (cat[fm.categoria || '—'] || 0) + v;
+          met[fm.metodo || '—'] = (met[fm.metodo || '—'] || 0) + v;
+        } else if (fm.tipo === 'receita') {
+          receita += parseFloat(fm.valor_mensal || 0);
+        }
+      }
+    } catch {}
+
+    try {
+      const arquivos = (await readdir(cliDir)).filter(f => f.endsWith('.md') && !f.includes('Clientes.md'));
+      for (const a of arquivos) {
+        const fm = parseFrontmatter(await readFile(join(cliDir, a), 'utf8'));
+        if (fm.tipo !== 'cliente' || fm.status !== 'ativo') continue;
+        receita += parseFloat(fm.plano_mensal || 0);
+      }
+    } catch {}
+  }
+
   const topCat = Object.entries(cat).sort((a, b) => b[1] - a[1]).slice(0, 5);
   const topMet = Object.entries(met).sort((a, b) => b[1] - a[1]);
-  return { periodo, inicio, receita, despesa, sobra: receita - despesa, qtd, topCat, topMet };
+  return { periodo, inicio, fim, receita, despesa, sobra: receita - despesa, qtd, topCat, topMet };
 }
 
 export async function removerLancamento(vaultPath, fileName) {

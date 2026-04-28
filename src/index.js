@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { Telegraf, Markup } from 'telegraf';
 import {
-  criarLancamento, atualizarSaldoConta, marcarFixaPaga,
+  criarLancamento, atualizarSaldoConta, ajustarSaldoConta, marcarFixaPaga,
   criarCliente, criarLead, criarProposta, appendDiario,
   lerStatus, lerSaldos, lerResumo, removerLancamento,
   lerContasSlugs, lerFixasPendentesSlugs, criarSnapshotPatrimonio
@@ -14,6 +14,7 @@ import { recordUndo, undoLast } from './lib/undo.js';
 import { loadTemplates, saveTemplate, deleteTemplate } from './lib/templates.js';
 import { categoriaKeyboard, metodoKeyboard, confirmKeyboard, descricaoKeyboard } from './lib/keyboards.js';
 import { parseNatural } from './lib/parse.js';
+import { parseNumeroBR, extrairNumero } from './lib/numbers.js';
 import { extractDate, extractNaturalDate } from './lib/dateparse.js';
 import { WIZARDS, stepKeyboard, confirmKb, renderResumo } from './lib/wizard.js';
 import { llmEnabled, llmTranscribe, llmVisionParse } from './lib/llm.js';
@@ -144,7 +145,7 @@ async function lancarDespesa(ctx, metodo) {
   const { dataISO, args } = extractDate(raw);
   const userId = String(ctx.from.id);
   if (args.length === 0) return ctx.reply(`Uso: /${metodo} <valor> [categoria] [descrição] [@DD/MM]`);
-  const valor = parseFloat(args[0].replace(',', '.'));
+  const valor = parseNumeroBR(args[0]);
   if (Number.isNaN(valor)) return ctx.reply(`Valor inválido: ${args[0]}`);
 
   if (args.length === 1) {
@@ -162,7 +163,7 @@ bot.command('gasto', async ctx => {
   const { dataISO, args } = extractDate(raw);
   const userId = String(ctx.from.id);
   if (args.length === 0) return ctx.reply(`Uso: /gasto <valor> [metodo] [categoria] [descrição] [@DD/MM]`);
-  const valor = parseFloat(args[0].replace(',', '.'));
+  const valor = parseNumeroBR(args[0]);
   if (Number.isNaN(valor)) return ctx.reply(`Valor inválido: ${args[0]}`);
 
   if (args.length === 1) {
@@ -192,7 +193,7 @@ bot.command('receita', async ctx => {
   const { dataISO, args } = extractDate(raw);
   const userId = String(ctx.from.id);
   if (args.length === 0) return startWizard(ctx, 'receita');
-  const valor = parseFloat(args[0].replace(',', '.'));
+  const valor = parseNumeroBR(args[0]);
   if (Number.isNaN(valor)) return ctx.reply(`Valor inválido: ${args[0]}`);
 
   if (args.length === 1) {
@@ -247,7 +248,7 @@ async function advanceWizard(ctx, value) {
   const step = w.steps[sess.step];
   if (!step) return false;
   if (step.type === 'number') {
-    const n = parseFloat(String(value).replace(',', '.'));
+    const n = parseNumeroBR(value);
     if (Number.isNaN(n)) { await ctx.reply(`Valor inválido: ${value}`); return true; }
     sess.data[step.key] = n;
   } else if (step.key === 'data') {
@@ -384,8 +385,9 @@ function renderConfirm(sess, prefix) {
   const natureza = prefix === 'rec' ? 'receita' : 'despesa';
   const icon = natureza === 'receita' ? '💚' : '💸';
   const met = sess.metodo ? ` (${sess.metodo})` : '';
+  const conta = sess.conta ? ` 🏦 ${sess.conta}` : '';
   const desc = sess.descricao && sess.descricao !== sess.categoria ? `\n_"${sess.descricao}"_` : '';
-  return `${icon} ${brl(sess.valor)}${met} — *${sess.categoria}*${desc}\n\nConfirmar?`;
+  return `${icon} ${brl(sess.valor)}${met} — *${sess.categoria}*${conta}${desc}\n\nConfirmar?`;
 }
 
 bot.action(/^(desp|rec):cat:(.+)$/, async ctx => {
@@ -424,14 +426,24 @@ bot.action(/^(desp|rec):ok$/, async ctx => {
   const natureza = prefix === 'rec' ? 'receita' : 'despesa';
   const { fileName, filePath } = await criarLancamento(VAULT, {
     natureza, valor: sess.valor, categoria: sess.categoria,
-    metodo: sess.metodo || '', conta: '', descricao: sess.descricao || sess.categoria,
+    metodo: sess.metodo || '', conta: sess.conta || '', descricao: sess.descricao || sess.categoria,
     data: sess.data
   });
   recordUndo(userId, { tipo: 'create_file', filePath });
+  let saldoMsg = '';
+  if (sess.conta) {
+    try {
+      const delta = natureza === 'receita' ? sess.valor : -sess.valor;
+      const r2 = await ajustarSaldoConta(VAULT, { contaSlug: sess.conta, delta });
+      saldoMsg = `\n🏦 ${sess.conta}: ${brl(r2.saldoAnterior)} → *${brl(r2.saldoNovo)}*`;
+    } catch (e) {
+      saldoMsg = `\n⚠️ Saldo conta não atualizado: ${e.message}`;
+    }
+  }
   clearSess(userId);
-  const r = await commitIfNeeded(`bot: ${natureza} ${sess.metodo || ''} ${brl(sess.valor)} ${sess.categoria}`);
+  const r = await commitIfNeeded(`bot: ${natureza} ${sess.metodo || ''} ${brl(sess.valor)} ${sess.categoria}${sess.conta ? ` [${sess.conta}]` : ''}`);
   const icon = natureza === 'receita' ? '💚' : '💸';
-  await ctx.editMessageText(`✅ ${icon} ${natureza} ${brl(sess.valor)}${sess.metodo ? ` (${sess.metodo})` : ''} — ${sess.categoria}\n📄 ${fileName}${pushSuffix(r)}`);
+  await ctx.editMessageText(`✅ ${icon} ${natureza} ${brl(sess.valor)}${sess.metodo ? ` (${sess.metodo})` : ''} — ${sess.categoria}\n📄 ${fileName}${saldoMsg}${pushSuffix(r)}`, { parse_mode: 'Markdown' });
 });
 
 bot.action(/^(desp|rec):no$/, async ctx => {
@@ -479,7 +491,7 @@ bot.command('cliente', async ctx => {
   const userId = String(ctx.from.id);
   if (args.length === 0) return startWizard(ctx, 'cliente');
   if (args.length < 2) return ctx.reply(`Uso: /cliente <nome> <plano_mensal> [telefone] [segmento]\nOu mande /cliente sem args pra modo guiado`);
-  const planoMensal = parseFloat(args[1].replace(',', '.'));
+  const planoMensal = parseNumeroBR(args[1]);
   if (Number.isNaN(planoMensal)) return ctx.reply(`Plano inválido: ${args[1]}`);
   const { fileName, filePath } = await criarCliente(VAULT, {
     nome: args[0], planoMensal, telefone: args[2] || '', segmento: args.slice(3).join(' ') || ''
@@ -494,7 +506,7 @@ bot.command('lead', async ctx => {
   const userId = String(ctx.from.id);
   if (args.length === 0) return startWizard(ctx, 'lead');
   if (args.length < 3) return ctx.reply(`Uso: /lead <nome> <frio|morno|quente> <potencial> [segmento]\nOu /lead sem args pra modo guiado`);
-  const potencial = parseFloat(args[2].replace(',', '.'));
+  const potencial = parseNumeroBR(args[2]);
   if (Number.isNaN(potencial)) return ctx.reply(`Potencial inválido: ${args[2]}`);
   const { fileName, filePath } = await criarLead(VAULT, {
     nome: args[0], temperatura: args[1].toLowerCase(), potencial, segmento: args.slice(3).join(' ') || ''
@@ -510,8 +522,8 @@ bot.command('proposta', async ctx => {
   const userId = String(ctx.from.id);
   if (args.length === 0) return startWizard(ctx, 'proposta');
   if (args.length < 3) return ctx.reply(`Uso: /proposta <cliente> <valor_mensal> <valor_setup>\nOu /proposta sem args pra modo guiado`);
-  const valorMensal = parseFloat(args[1].replace(',', '.'));
-  const valorSetup = parseFloat(args[2].replace(',', '.'));
+  const valorMensal = parseNumeroBR(args[1]);
+  const valorSetup = parseNumeroBR(args[2]);
   if (Number.isNaN(valorMensal) || Number.isNaN(valorSetup)) return ctx.reply(`Valores inválidos`);
   const { fileName, filePath } = await criarProposta(VAULT, { cliente: args[0], valorMensal, valorSetup });
   recordUndo(userId, { tipo: 'create_file', filePath });
@@ -544,7 +556,7 @@ bot.command('saldo', async ctx => {
   const userId = String(ctx.from.id);
   if (args.length === 0) return startWizard(ctx, 'saldo');
   if (args.length < 2) return ctx.reply(`Uso: /saldo <conta-slug> <novo-valor>\nOu /saldo sem args pra modo guiado`);
-  const novoSaldo = parseFloat(args[1].replace(',', '.'));
+  const novoSaldo = parseNumeroBR(args[1]);
   if (Number.isNaN(novoSaldo)) return ctx.reply(`Valor inválido`);
   const { fileName } = await atualizarSaldoConta(VAULT, { contaSlug: args[0], novoSaldo });
   const r = await commitIfNeeded(`bot: saldo ${args[0]} ${brl(novoSaldo)}`);
@@ -574,8 +586,8 @@ bot.command('patrimonio', async ctx => {
   const userId = String(ctx.from.id);
 
   // /patrimonio <valor> → snapshot manual com valor
-  if (args.length >= 1 && !Number.isNaN(parseFloat(args[0].replace(',', '.')))) {
-    const valor = parseFloat(args[0].replace(',', '.'));
+  if (args.length >= 1 && !Number.isNaN(parseNumeroBR(args[0]))) {
+    const valor = parseNumeroBR(args[0]);
     const contas = await lerSaldos(VAULT);
     const { fileName, filePath } = await criarSnapshotPatrimonio(VAULT, { valor, contas });
     recordUndo(userId, { tipo: 'create_file', filePath });
@@ -667,7 +679,7 @@ bot.command('template', async ctx => {
   if (sub === 'add') {
     if (args.length < 6) return ctx.reply(`Uso: /template add <nome> <valor> <metodo> <categoria> <desc>`);
     const [_, nome, valorStr, metodo, categoria, ...rest] = args;
-    const valor = parseFloat(valorStr.replace(',', '.'));
+    const valor = parseNumeroBR(valorStr);
     if (Number.isNaN(valor)) return ctx.reply(`Valor inválido`);
     await saveTemplate(nome, { tipo: 'despesa', valor, metodo, categoria, descricao: rest.join(' ') });
     return ctx.reply(`✅ Template /${nome} salvo.`);
@@ -686,6 +698,17 @@ for (const nome of Object.keys(templates)) {
   bot.command(nome, ctx => lancarTemplate(ctx, nome));
 }
 
+// Token-based match: slug "conta-nubank" bate com hint "nubank"
+function resolveContaSlug(hint, slugs) {
+  if (!hint) return '';
+  const hintTokens = String(hint).toLowerCase().split(/[\s\-_]+/).filter(Boolean);
+  if (!hintTokens.length) return '';
+  return slugs.find(s => {
+    const sTokens = s.toLowerCase().split(/[\s\-_]+/);
+    return hintTokens.some(t => sTokens.includes(t));
+  }) || '';
+}
+
 // ============ NATURAL LANGUAGE / VOICE / FOTO ============
 
 async function processarNatural(ctx, text) {
@@ -693,16 +716,15 @@ async function processarNatural(ctx, text) {
 
   // 0. Intent shortcuts: atualizar saldo / patrimônio
   const intent = text.toLowerCase().trim();
-  const valorMatch = intent.match(/(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[,.]\d{1,2})?)/);
   const intentKw = intent.match(/^(atualiza(?:r)?|saldo|patrim[oô]nio)\s+(.+)/);
   if (intentKw) {
     const tail = intentKw[2];
     const kw = intentKw[1];
-    const valStr = valorMatch ? valorMatch[1] : null;
-    const valor = valStr ? parseFloat(valStr.replace(/\./g, '').replace(',', '.')) : null;
+    const num = extrairNumero(tail);
+    const valor = num && num.valor > 0 ? num.valor : null;
     const contas = await lerContasSlugs(VAULT);
-    const tailSemValor = tail.replace(valorMatch ? valorMatch[0] : '', '').trim();
-    const conta = contas.find(c => tailSemValor.includes(c) || c.includes(tailSemValor));
+    const tailSemValor = num ? tail.replace(num.raw, '').trim() : tail;
+    const conta = resolveContaSlug(tailSemValor, contas);
     if (conta && valor) {
       const { fileName } = await atualizarSaldoConta(VAULT, { contaSlug: conta, novoSaldo: valor });
       const r = await commitIfNeeded(`bot: saldo ${conta} ${brl(valor)}`);
@@ -728,13 +750,20 @@ async function processarNatural(ctx, text) {
   if (parsed.acao === 'desconhecido' || !parsed.valor) {
     return ctx.reply(`🤔 Não entendi. Tenta:\n• "gastei 50 no mercado pix"\n• /help`);
   }
-  setSess(userId, { fluxo: parsed.acao, valor: parsed.valor, metodo: parsed.metodo, categoria: parsed.categoria, descricao: parsed.descricao, data: dataISO });
+  // Resolve conta hint contra slugs reais do vault (token-based)
+  let contaResolved = '';
+  if (parsed.conta) {
+    const contas = await lerContasSlugs(VAULT);
+    contaResolved = resolveContaSlug(parsed.conta, contas);
+  }
+  setSess(userId, { fluxo: parsed.acao, valor: parsed.valor, metodo: parsed.metodo, categoria: parsed.categoria, descricao: parsed.descricao, conta: contaResolved, data: dataISO });
   const icon = parsed.acao === 'receita' ? '💚' : '💸';
   const prefix = parsed.acao === 'receita' ? 'rec' : 'desp';
   const met = parsed.metodo ? ` (${parsed.metodo})` : '';
+  const contaMsg = contaResolved ? ` 🏦 ${contaResolved}` : '';
   const dataMsg = dataISO ? ` 📅 ${dataISO.split('-').reverse().join('/')}` : '';
   return ctx.reply(
-    `${icon} ${parsed.acao} ${brl(parsed.valor)}${met} — *${parsed.categoria}*${dataMsg}\n_"${parsed.descricao}"_\n\nConfirmar?`,
+    `${icon} ${parsed.acao} ${brl(parsed.valor)}${met} — *${parsed.categoria}*${contaMsg}${dataMsg}\n_"${parsed.descricao}"_\n\nConfirmar?`,
     { parse_mode: 'Markdown', ...confirmKeyboard(prefix) }
   );
 }
